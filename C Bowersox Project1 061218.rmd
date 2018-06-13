@@ -1,5 +1,5 @@
 ---
-title: "Project 1 Basic System"
+title: "Project 1 Baseline Predictors and RMSE"
 author: "Cheryl Bowersox"
 date: "June 12, 2018"
 output: html_document
@@ -16,16 +16,29 @@ This data was broken into a training set of 80% of the jokes, and a test set of 
 Source data: 
 http://www.ieor.berkeley.edu/%7Egoldberg/jester-data/ 
 
-```{r setup, include=FALSE}
+Github link:
+https://github.com/cherylb/IS643 
+
+
+
+```{r}
 # data set 
 
 # take mean of entire set
 library(dplyr)
 library(tidyr)
 library(reshape)
-
+library(RCurl)
 
 #read data
+#options(RCurlOptions = list(cainfo = system.file("CurlSSL", "cacert.pem", package = "RCurl")))
+#fileurl= "https://raw.githubusercontent.com/cherylb/IS643/master/jester-data-1.csv"
+#data <- getURL(fileurl)
+#dfdm <- read.csv(text = data, , stringsAsFactors=FALSE)
+
+#shucks that a big file
+# -or - local
+#
 joke <- read.csv("~/GitHub/IS643/jester-data-1.csv", header = FALSE)
 
 #sort by # of reviews completed, select to 100 users
