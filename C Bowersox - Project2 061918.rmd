@@ -1,0 +1,349 @@
+---
+title: "Project 2 Content Based and Collaborative Filtering"
+author: "Cheryl Bowersox"
+date: "June 19, 2018"
+output: html_document
+---
+
+In this project two models were developed to provide a beer recommendation for users based their preferences. The first was an item-item profile, the second using collaborative filtering. The data is provided as a matrix of users and each users rankings given to each beer across several attributes. 
+
+
+Unique Users are defined by variable review_profilename
+Unique beer (items) are defined by variable beer_beerid
+
+
+Data Source: 
+
+https://data.world/socialmediadata/beeradvocate
+
+
+## Data Exploration
+```{r echo=FALSE, message=FALSE}
+# import libraries
+library(recommenderlab)
+library(dplyr)
+library(tidyr)
+library(reshape2)
+library(caret)
+library(pROC)
+library(ggplot2)
+
+
+
+#read data from github
+#library(RCurl)
+#options(RCurlOptions = list(cainfo = system.file("CurlSSL", "cacert.pem", package = "RCurl")))
+#fileurl= "https://raw.githubusercontent.com/cherylb/IS643/master/beerdata.csv"
+#data <- getURL(fileurl)
+#beerdata<- read.csv(text = data, , stringsAsFactors=FALSE)
+
+#read data
+beerdata <- read.csv("~/GitHub/IS643/beerdata.csv")
+
+# examine some properties of the data
+
+# group overall ratings by by beer styles
+beertypes <- beerdata%>%select(beer_style, review_overall)%>%group_by(beer_style)%>%summarise(avgrev= mean(review_overall), count=n())
+
+# remove ratings less than 1% of data points
+sparseratings <- beerdata%>%select(beer_beerid, review_overall)%>%
+  group_by(beer_beerid)%>%
+  summarise(count=n())
+
+# remove ratings less than 1% of data points
+sparseusers <- beerdata%>%select(beer_beerid, review_profilename)%>%
+  group_by(review_profilename)%>%
+  summarise(count=n())
+```
+
+Plotting the number of ratings vs. the beer ID shows more ratings for smaller ID numbers. This looks like just an artifact of the numbering system as it makes sense the early (lower) beer ID's have been in the system longest, and have received more ratings.  
+```{r}
+plot(sparseratings)
+```
+The total number of distinct beers is `r nrow(sparseratings)` and the beers cover a wide range of number of ratings, from as few as `r min(sparseratings$count)` to `r max(sparseratings$count)`. 
+The beer data is sparse, as there are `r nrow(sparseratings %>% filter(count == 1))` beers that have received only 1 rating. This accounts for around 35% of the total number of items. 
+
+
+
+Plotting the number of ratings per user shows a fairly uniform distribution across the `r nrow(sparseusers)` distinct users, with the number of ratings ranging from `r min(sparseusers$count)` to `r max(sparseusers$count)`. There are `r nrow(sparseusers %>% filter(count < 3))` users that have rated less than 3 items.  This accounts for around 45% of the total number of user
+
+```{r}
+plot(sparseusers$count)
+```
+
+Our raw data contains `r nrow(beerdata)` data points, and a ratings matrix for this data would be 28762 X 42719. By removing beers that have received less than 10 ratings, and users that have rated less than 10 beers we can reduce the size significantly. 
+
+```{r echo=FALSE, message=FALSE}
+#remove items with 1 rating
+v <- sparseratings%>% filter(count >10 ) #where the beers have few ratings
+
+w <- sparseusers%>% filter(count > 10)  #where the users have rated few beers
+dfbeerrm <- beerdata%>%
+  filter(beer_beerid %in% v$beer_beerid, review_profilename %in% w$review_profilename)
+
+items <- dfbeerrm%>%select(beer_name, review_overall)%>%
+  group_by(beer_name)%>%
+  summarise(count=n())%>%arrange(-count)
+items_n <- nrow(items)
+
+users<- dfbeerrm%>%select(review_profilename, review_overall)%>%
+  group_by(review_profilename)%>%
+  summarise(count=n())%>%arrange(-count)
+
+users_n <- nrow(dfbeerrm%>%select(review_profilename, review_overall)%>%
+  group_by(review_profilename)%>%
+  summarise(count=n()))
+```
+
+The new data set containing only users that have rated 10 or more beers, and only beers with more than 10 ratings has been reduced to `r nrow(dfbeerrm) ` rows, with `r items_n ` items and `r users_n` users. By removing these items we have reduced the ratings matrix to a more manageable size of 15831 X 27479.  
+
+Now that we have a reduced data set, we can split it into training and test data, with 80% of the data used as training, and 20% for testing the models.
+
+```{r}
+train_amt <- floor(0.8 * nrow(dfbeerrm))
+set.seed(408)
+ind <- sample(seq_len(nrow(dfbeerrm)), size = train_amt)
+
+train_beer <- dfbeerrm[ind, ]
+test_beer <- dfbeerrm[-ind, ]
+```
+
+## Model1: User/Item profile model
+
+
+This model will compare users attributes with item attributes to find good matches for recommendations.  The goal will be to predict if a beer will receive a positive rating from a given user. 
+
+First we define a statistical model for each user based on their rating history. For each beer we will develop a 'beer profile' based on mean ratings for attributes of that beer, and use these as inputs to the user profile model to estimate the probable rating for that user for that beer. The highest rated outputs will be used as the recommended beers.  
+
+```{r}
+# for user i which review metric is most important. That is, which score for aroma, appearance, palate or taste best predicts a high overall rating?  
+# model, select top 2 predictors 
+
+#model beers in all data (train + test) so this will not need to be repeated
+dfbeerprof <- dfbeerrm%>%select(beer_beerid, beer_name, beer_abv, review_overall,review_aroma,review_appearance, review_palate, review_taste)%>%group_by(beer_beerid,beer_name,beer_abv)%>%summarise(review_aroma=mean(review_aroma), review_appearance = mean(review_appearance), review_palate = mean(review_palate), review_taste = mean(review_taste), count=n())
+
+#replace any NA with 0, so these variables will not impact the model 
+dfbeerprof[is.na(dfbeerprof)] <- 0
+```
+
+Create recommendation for a user
+
+```{r echo=FALSE, message=FALSE}
+#define function to model user profile data with profile name as input, and recomendations as output
+
+#output is a list with 3 items
+# 1. Model for user - selected through stepAIC to select best model for this user
+# 2. result of the model against all beers in the beer profile list
+# 3. top 10 rated beers as the recommendation from the profil we selected
+
+model1 <- function(train_beer, user, dfbeerprof){
+  
+  train_1user <- train_beer%>%filter(review_profilename == user1)
+  
+  library(MASS)
+  fit <- lm(review_overall ~ review_aroma + review_appearance + review_palate + review_taste+ beer_abv, train_1user)
+  modeluser <- stepAIC(fit, direction="both")
+  yhat <- predict(modeluser,train_1user,type='response')
+  #compare prediction to latest 
+  plot(yhat, train_1user$review_overall, main ="user model predicted vs actual")
+  detach("package:MASS", unload=TRUE)
+  
+  #model beers for this user
+  dfbeerprof$predict_beers <- predict(modeluser, dfbeerprof, type ='response')
+  
+  dfrecomend1 <- head(dfbeerprof%>%select(beer_beerid, beer_name, predict_beers) %>%
+                        ungroup()%>% arrange(-predict_beers),10)
+    #filter(!beer_beerid %in% train_1user$beer_beerid) %>%
+
+                      
+  dfcompare <- merge(x = dfbeerprof, y = train_1user, by = "beer_beerid")
+  model1_results <- list(modeluser, dfcompare, dfrecomend1)
+return(model1_results)
+}
+
+#dislpay output recomendations for two users, one with many items, one with very few
+user1 <- as.character(users[100,1][[1]])
+
+user2 <- as.character(users[700,1][[1]])
+
+model1_user1 <- model1(train_beer, user1, dfbeerprof)
+model1_user2 <- model1(train_beer, user2, dfbeerprof)
+```
+Running model1 for the user `r user1` results in the following recommendations:
+```{r}
+model1_user1[[3]]$beer_name
+```
+
+Model for user `r user2` results in the following recommendations:
+```{r}
+model1_user2[[3]]$beer_name
+```
+Looking at the model's predictions compared to the user's actual ratings gives the following comparison, showing the positive actual ratings are generally associated with more positive predictions, but with more variability in the lower ratings, and tends to predict a rating a little lower than the user actually predicted. 
+
+```{r}
+dfcompare1_2 <- rbind(model1_user1[[2]],model1_user2[[2]])
+
+plot(dfcompare1_2$review_overall,dfcompare1_2$predict_beers, main = "User Predicitons vs Ratings")
+
+```
+We can also use a confusion matrix to evaluating this prediction model for this user
+In this case, we will assume any rating greater than 3 is a positive rating, indicated as '1' and any rating lower as negative, indicated as '0'. 
+```{r}
+      
+  #evaluate the prediction for this user using confusion matrix using beers already rated
+  #where rating above 3 is considered positive, and 3 or below is negative
+
+  ### evalute output, model
+
+
+  target <- ifelse(dfcompare1_2$review_overall > 2.9, 1, 0) #repsents positive rating
+  predbeer <- ifelse(dfcompare1_2$predict_beers >2.9, 1,0)
+  targetf <- as.factor(target)
+  predbeerf <- as.factor(predbeer)
+  
+  (cm1<-confusionMatrix(data=predbeerf, 
+  reference=targetf))
+  accuracy1<-cm1$overall["Accuracy"]
+  recall1 <- cm1$byClass['Sensitivity']
+  specificity1 <- cm1$byClass['Specificity']
+  precision1 <- cm1$byClass['Pos Pred Value'] 
+  f_measure1 <- 2 * ((precision1 * recall1) / (precision1 + recall1))
+  rocModel1 <- roc(target,predbeer)
+
+
+```
+From the confusion matrix we can see that it correctly classified `r accuracy1` of the ratings as either of positive or negative.  More interestingly, the positive prediction value, or precision, is `r precision1`, meaning this model tends to err on the side of 'false positives'. This could be possibly be corrected by adjusting the threshold for what is considered a 'positive' rating. 
+
+To fully test the accuracy it will be necessary to run this model against the training data for all users, but this seems a promising, if calculation -intensive approach.  
+
+
+
+##model 2:  item based collaborative filtering method
+
+For the item-based collaborative filtering method I am using the recoomenderlab package, and using the IBCF algorithm, normalizing the data to remove user-rating bias, and using the cosine distance method. 
+I am selecting a subset of the training data (80% of total) to run these models. I am choosing to evaluate it for a sample of 502 users, and the 100 items with the most ratings for that sample of users.
+
+```{r}
+#get data in correct format
+usersample <- c(as.character(sample(users$review_profilename,500)),user1,user2)
+itemsample <- head(train_beer%>%filter(review_profilename %in% usersample)%>%
+  group_by(beer_name)%>%summarise(count =n())%>%arrange(-count),100)$beer_name
+
+
+df <- train_beer %>%
+  select(user = review_profilename, beer = beer_name, rate = review_overall)%>%
+  filter(user %in% usersample, beer %in% itemsample)
+
+user_n<- df%>%group_by(user)%>%summarise(count=n())
+
+#user hold in reserve to evaluate on test data:
+df_test <- test_beer %>%
+  select(user = review_profilename, beer = beer_name, rate = review_overall)%>%
+  filter(user %in% usersample, beer %in% itemsample)
+
+
+ratemat <- as(df,"realRatingMatrix")
+#ratemat_test <- as(df_test, "realRatingMatrix")
+
+#train models
+recIBCF <- Recommender(ratemat,method="IBCF", 
+      param=list(normalize = "Z-score",method="Cosine", minRating=1))
+
+#recSVD <- Recommender(ratemat,method="SVD", 
+#    param=list(maxiter=50, normalize = "center"))
+
+
+
+# compare predictions
+pred_IBCF <- predict(recIBCF, ratemat, type ="ratingMatrix")
+M_pred_IBCF <- as(pred_IBCF, "matrix")
+dfpred_IBCF<- melt(M_pred_IBCF)
+
+#merge test data for IBCF with predictions
+nms <- c("user","beer","IBCF_Predict")
+colnames(dfpred_IBCF) = nms
+dfpred_IBCF<- na.omit(dfpred_IBCF)
+
+#predict top 10 for our two example users
+
+model2user1 <- head(dfpred_IBCF%>%filter(user == user1)%>%arrange(-IBCF_Predict),10)
+model2user2 <- head(dfpred_IBCF%>%filter(user == user2)%>%arrange(-IBCF_Predict),10)
+
+df_compare2 <- merge(x = df_test, y = dfpred_IBCF, by = c("user","beer"))
+#clean up data
+df_compare2$IBCF_Predict <- ifelse(df_compare2$IBCF_Predict < 1, 1, df_compare2$IBCF_Predict)
+df_compare2$IBCF_Predict <- ifelse(df_compare2$IBCF_Predict > 5, 5, df_compare2$IBCF_Predict)
+```
+A subset of the test data (20% of total data) was created containing just users that are included in our training subset. When this is merged with the predictions created by the IBCF model we can compare the two. The predictions seem skewed when compared to the actual ratings, which will lead in errors on the side of too many positive ratings. 
+
+```{r}
+plot(x = df_compare2$rate, y=df_compare2$IBCF_Predict, main = "IBCF predictions vs. actual ratings")
+
+hist(df_compare2$IBCF_Predict,main="Predictions Distributrion",xlab="Predictions")
+hist(df_compare2$rate,main="Actual Ratings Distributrion",xlab="Test Ratings")
+```
+
+#confusion matrix for IBCF model
+A confusion matrix for the IBCF model results in a high accuracy, but this may be misleading when the majority of ratings in the test data are above 3. There is little distinction between a prediction of 4.9 and an actual rating of 3.1 in this case.  
+```{r}
+target <- ifelse(df_compare2$rate > 2.9, 1, 0) #reprsents positive rating
+predbeer <- ifelse(df_compare2$IBCF_Predict > 2.9, 1,0)
+targetf <- as.factor(target)
+predbeerf <- as.factor(predbeer)
+(cm2<-confusionMatrix(data=predbeerf, 
+reference=targetf))
+accuracy2<-cm2$overall["Accuracy"]
+recall2 <- cm2$byClass['Sensitivity']
+specificity2 <- cm2$byClass['Specificity']
+precision2 <- cm2$byClass['Pos Pred Value'] 
+f_measure2 <- 2 * ((precision2 * recall2) / (precision2 + recall2))
+rocModel2 <- roc(target,predbeer)
+```
+
+If we shift the threshold for what is considered 'positive, to 4 and above, the model is significantly less accurate
+```{r}
+target <- as.factor(ifelse(df_compare2$rate > 4, 1, 0)) #reprsents positive rating
+predbeer <- as.factor(ifelse(df_compare2$IBCF_Predict >4, 1,0))
+
+(cm2<-confusionMatrix(data=predbeer, 
+reference=target))
+```
+
+##Model1 vs. Model 2 
+
+Comparing recommendations for model1 vs. model2 we can see very recommendations for the two users selected for model1
+Model1 and Model2  produces the following for `r user1`
+```{r}
+#User1,
+print("Model1 User1")
+model1_user1[[3]]
+print("Model2 User1")
+model2user1
+
+
+```
+Models for User 2 predicts the following
+```{r}
+print("Model1 User2")
+model1_user2[[3]]
+print("Model2 User2")
+model2user2
+```
+
+When comparing the different model's power to predict a positive rating, we can look at the confusion matrix statistics for each. They seem very similar in accuracy although the model 1 has greater sensitivity and higher F1 Score. 
+
+```{r echo=FALSE, message=FALSE}
+aucModel1 <- auc(rocModel1)
+aucModel2 <- auc(rocModel2)
+cmStats <- matrix(c(accuracy1,precision1,recall1,specificity1,f_measure1,aucModel1,accuracy2,precision2,recall2,specificity2,f_measure2,aucModel2), ncol=2)
+colnames(cmStats) <- c('Model 1', 'Model 2')
+rownames(cmStats) <- c('Accuracy', 'Precision','Sensitivity','Specificity','F1 Score','AUC')
+
+(cmStats)
+```
+
+While model 1 may seem to predict better when comparing per-user errors, it is not very scale-able,  as it is creating a model for each user and then applying the the averaged profile for all items. 
+A new model must be generated for each user recommendation, whereas with the IBCF method you may have greater error in specific ratings, but the recommendations are computed all at once for all users, making it more efficient. If the goal of this recommendation is to provide a list of beers that are likely to get a positive rating, Model 2 would be a better choice. 
+If the goal, however, is to provide a very customized list for each user of beers they are likely to rate very highly, Model 1 would be a better choice, provided we have enough data from the user in question.  
+
+
