@@ -1,0 +1,26 @@
+---
+title: "Final Project Proposal - Drinking Game""
+author: "Cheryl Bowersox"
+date: "July 5th, 2018"
+output: html_document
+---
+
+
+Proposed System:  For the final project I propose to continue to work with beer rating data to create a system that provides tasty beverage recommendations to individuals. This system will generate a personalized beer recommendations for a given user based existing data as well as a few parameters explicitly defined by the users. This system will create a user profile using these inputs and match this profile with beer attributes, creating a set of recommendations.  The purpose of the user provided inputs is to providing weighting for various attribute importance and provide functional recommendations when the user may not have many ratings available in the data. 
+
+Description of source data and key elements:
+Unique Users(users) are defined by variable review_profilename
+Unique beer (items) are defined by variable beer_beerid
+
+User profiles will be generated for each user based on their prior ratings, with importance of various attributes explicitly provided as user input. The nature of these explicit inputs will be determined through exploration of the given data set during development of the system.  
+
+Based on this profile, the user will be matched with beers that define the system.  
+
+Data Source: 
+
+https://data.world/socialmediadata/beeradvocate  
+
+
+The raw data contains 1,048,575 data points, and will require disturbed processing or application of mathematical transformations to produce efficient recommendations. 
+
+
