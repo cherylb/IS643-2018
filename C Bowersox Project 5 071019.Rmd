@@ -1,0 +1,286 @@
+---
+title: "Project 5 Implementing a Recommender System on Spark"
+author: "Cheryl Bowersox"
+date: "July 10, 2018"
+output: html_document
+---
+
+This project uses the sparklyr package to set up distributed commuting for creating a recommend system, and compares this to the results of a custom function 'model1' created during project #1. This function process is resource intensive and should provide a good comparison. The system uses the Beer Advocate data set used in previous projects.  
+
+
+Data Source: 
+
+https://data.world/socialmediadata/beeradvocate  
+
+
+
+To evaluate using Spark, I created two functions. The first, 'nospark'  manipulates the data using and creates a recommendation using the model design during project 2.  The second function, 'yespark', performs almost the exact same tasks, using the same model, but uses distributed data.  A time stamp was taken for each function and the times compared.  
+
+Because of difficulty found in manipulating a spark data frame to run the model for the same user,  the user selected in 'nospark' is passed to the 'yespark' function.  
+
+This project was not completed by the due date, and I was not able to fully implement the 'yespark' function.  The source of the errors is not apparent at this time, but it is related to the use of a 'select' or filter statement with the spark data table.  From running many tests I can see the manipulation of the data is much faster, but have not been able to adequately compare the two procedures. 
+
+
+Comments on an incomplete project:
+
+This code fails at lines 266-285, I have found the problem is with the use of select in dplyr but have not been able to identify the source.  
+
+The idea of this project was to understand how to use distributed data and the experiment with how it can accelerate the  manipulation of the typically very large data sets used to build recommendation systems.  This project was designed to compare this method using a computational intinsive system. I chose to use R and the sparklyr package to attempt to implement a local version of spark. This was too ambitious a project for this class, as I experienced difficulty installing spark, and the additional difficulty of attempting to use custom functions.  The Spark data table behaves much like a standard data frame, but there are important differences and nuances in how the data is manipulated.
+
+
+```{r echo=FALSE, warning=FALSE}
+
+#load data
+#read data
+library(recommenderlab)
+library(dplyr)
+library(tidyr)
+#library(reshape2)
+library(caret)
+library(pROC)
+library(ggplot2)
+
+library(tictoc)
+
+
+
+#model function
+
+model1 <- function(train_beer, user, dfbeerprof){
+  
+  train_1user <- train_beer%>%filter(review_profilename == user1)
+  library(MASS)
+  fit <- lm(review_overall ~ review_aroma + 
+              review_appearance + 
+              review_palate + 
+              review_taste+ 
+              beer_abv, train_1user)
+  modeluser <- stepAIC(fit, direction="both")
+  yhat <- predict(modeluser,train_1user,type='response')
+  #compare prediction to latest 
+  plot(yhat, train_1user$review_overall, main ="user model predicted vs actual")
+  detach("package:MASS", unload=TRUE)
+  
+  #model beers for this user
+  dfbeerprof$predict_beers <- predict(modeluser, dfbeerprof, type ='response')
+  
+  dfrecomend1 <- head(dfbeerprof%>%select(beer_beerid, beer_name, predict_beers) %>%
+                        ungroup()%>% arrange(-predict_beers),10)
+    #filter(!beer_beerid %in% train_1user$beer_beerid) %>%
+
+                      
+  dfcompare <- merge(x = dfbeerprof, y = train_1user, by = "beer_beerid")
+  model1_results <- list(modeluser, dfcompare, dfrecomend1)
+return(model1_results)
+}
+
+```
+
+
+
+
+```{r echo=FALSE}
+#Manipulate and run - regular
+nospark <- function(user1){
+  
+  ns.load.start <- Sys.time()
+  beerdata <- read.csv("~/GitHub/IS643/beerdata.csv")
+  ns.load.stop <-Sys.time()
+  
+
+  #time data manipulations
+  ns.datam.start <- Sys.time()
+  
+  beertypes <- beerdata%>%
+    select(beer_style, review_overall)%>% group_by(beer_style)%>%
+    summarise(avgrev= mean(review_overall), count=n())
+  
+  # remove ratings less than 1% of data points
+  sparseratings <- beerdata%>%select(beer_beerid, review_overall)%>%
+    group_by(beer_beerid)%>%
+    summarise(count=n())
+  
+  # remove ratings less than 1% of data points
+  sparseusers <- beerdata%>%select(beer_beerid, review_profilename)%>%
+    group_by(review_profilename)%>%
+  summarise(count=n())
+  
+  v <- sparseratings%>% filter(count >10 ) #where the beers have few ratings
+
+  w <- sparseusers%>% filter(count > 10)  #where the users have rated few beers
+  
+  dfbeerrm <- beerdata%>%
+    filter(beer_beerid %in% v$beer_beerid, review_profilename %in% w$review_profilename)
+  
+  items <- dfbeerrm%>%select(beer_name, review_overall)%>%
+    group_by(beer_name)%>%
+    summarise(count=n())%>%arrange(-count)
+  items_n <- nrow(items)
+  
+  users<- dfbeerrm%>%select(review_profilename, review_overall)%>%
+    group_by(review_profilename)%>%
+    summarise(count=n())%>%arrange(-count)
+  
+  users_n <- nrow(dfbeerrm%>%select(review_profilename, review_overall)%>%
+    group_by(review_profilename)%>%
+    summarise(count=n()))
+  
+  train_amt <- floor(0.8 * nrow(dfbeerrm))
+  set.seed(408)
+  ind <- sample(seq_len(nrow(dfbeerrm)), size = train_amt)
+
+  train_beer <- dfbeerrm[ind, ]
+  test_beer <- dfbeerrm[-ind, ]
+  #model beers in all data (train + test) so this will not need to be repeated
+  dfbeerprof <- dfbeerrm%>%
+    select(beer_beerid, beer_name, beer_abv,
+                                  review_overall,review_aroma,review_appearance, review_palate,
+                                  review_taste)%>%
+    group_by(beer_beerid,beer_name,beer_abv)%>%
+    summarise(review_aroma=mean(review_aroma), review_appearance = mean(review_appearance),
+              review_palate = mean(review_palate), review_taste = mean(review_taste), count=n())
+  
+  #replace any NA with 0, so these variables will not impact the model 
+  dfbeerprof[is.na(dfbeerprof)] <- 0
+  
+  
+  ns.datam.stop <- Sys.time()
+  
+  #dislpay output recomendations for two users, one with many items, one with very few
+  ns.recom.start <- Sys.time()
+  model1_user1 <- model1(train_beer, user1, dfbeerprof)
+  ns.recom.stop <- Sys.time()
+  
+  #return load, data manipulation, recomendation, and total times
+  ns.times <- c(ns.load.stop - ns.load.start, 
+                ns.datam.stop -ns.datam.start, 
+                ns.recom.stop - ns.recom.start, 
+                ns.recom.stop - ns.load.start)
+  noresults <- list(no_spark_results =model1_user1[[3]], time_no_spark =ns.times)
+
+  return(noresults)
+}
+
+```
+
+
+
+```{r }
+
+#Use Spark
+library(sparklyr)
+
+# spark_install(version = "2.3.0", hadoop_version = "2.7")
+sc <- spark_connect(master = "local")
+
+#use spark to manipulate and calculate recommender systems
+#data uploaded to cluster
+
+yespark <- function(user1){
+  #time load data
+  ys.load.start <- Sys.time()
+  beer_tbl <- spark_read_csv(sc, name = 'beer_sc',path = "~/GitHub/IS643/beerdata.csv")
+  ys.load.stop <- Sys.time()
+  
+  #time data manipulations
+  ys.datam.start <- Sys.time()
+  
+  beertypes <- beer_tbl%>%
+    select(beer_style,review_overall)%>%
+    group_by(beer_style)%>%summarise(avgrev= mean(review_overall), count=n())
+  
+  # remove ratings less than 1% of data points
+  sparseratings <- beer_tbl%>%select(beer_beerid, review_overall)%>%
+    group_by(beer_beerid)%>%
+    summarise(count=n())
+  
+  # remove ratings less than 1% of data points
+  sparseusers <- beer_tbl%>%select(beer_beerid, review_profilename)%>%
+    group_by(review_profilename)%>%
+  summarise(count=n())
+  
+  v <- sparseratings%>% filter(count >10 ) #where the beers have few ratings
+
+  w <- sparseusers%>% filter(count > 10)  #where the users have rated few beers
+  
+  dfbeerrm <- anti_join(beer_tbl, v, by = "beer_beerid", copy = FALSE)
+  dfbeerrm <- anti_join(dfbeerrm, w, by = "review_profilename", copy = FALSE)
+  
+  df <- dfbeerrm%>%mutate(itsone = 1)
+  
+  items <- dfbeerrm%>%select(beer_name, review_overall)%>%
+    group_by(beer_name)%>%
+    summarise(count=n())%>%arrange(-count)
+  items_n <- count(items)
+  
+  users<- dfbeerrm%>%select(review_profilename, review_overall)%>%
+    group_by(review_profilename)%>%
+    summarise(count=n())%>%arrange(-count)
+  
+  users_n <- count(dfbeerrm%>%select(review_profilename, review_overall)%>%
+    group_by(review_profilename)%>%
+    summarise(count=n()))
+  
+  #data sets into train/test
+  splitsville <- sdf_partition(dfbeerrm, train = 0.8, test = 0.2, seed = 1234)
+
+  
+  train_beer <- splitsville$train
+  test_beer <- splitsville$test
+  
+  #model beers in all data (train + test) so this will not need to be repeated
+  dfbeerprof <- dfbeerrm%>%
+    select(beer_beerid, beer_name, beer_abv,
+                                  review_overall,review_aroma,review_appearance, review_palate,
+                                  review_taste)%>%
+    group_by(beer_beerid,beer_name,beer_abv)%>%
+    summarise(review_aroma=mean(review_aroma), review_appearance = mean(review_appearance),
+              review_palate = mean(review_palate), review_taste = mean(review_taste), count=n())
+  
+  #replace any NA with 0, so these variables will not impact the model 
+  dfbeerprof[is.na(dfbeerprof)] <- 0
+  
+  
+  ys.datam.stop <- Sys.time()
+  
+  #dislpay output recomendations for two users, one with many items, one with very few
+  ys.recom.start <- Sys.time()
+  #convert back to df for model
+  train_beer_r <- collect(train_beer)
+  dfbeerprof_r <- collect(dfbeerprof)
+  model1_user1 <- model1(train_beer, user1, dfbeerprof)
+  ys.recom.stop <- Sys.time()
+  
+  #return data, recomendation, and total times
+  ys.times <- c(ys.load.stop - ys.load.stop, 
+                ys.datam.stop -ys.datam.start, 
+                ys.recom.stop- ys.recom.start, 
+                ys.recom.stop - ys.load.start)
+  
+
+  return(ys.times)
+}
+
+
+```
+
+```{r echo=FALSE}
+#run models for test user "kmpitz2"
+
+testuser <- "kmpitz2"
+
+#Run no spark
+test1 <- nospark(testuser)
+
+#beerlist <- data.frame(test1[1])
+#time_compare <- as.data.frame(test1[2])
+
+#time_compare$measure <- c("Loading","Processing Data", "calculating", "Total time")
+
+#run a spark
+
+test2 <- yespark(testuser)
+
+#beerlist <- data.frame(test2[1])
+#time_compare$sparktime <- as.data.frame(test2[2])
+#colnames(timecompare) <- c("No Spark", "Measure", "Spark"")
