@@ -1,0 +1,397 @@
+---
+title: "Project 3 Matrix Factorization Method - SVD"
+author: "Cheryl Bowersox"
+date: "July 19 2018""
+output: html_document
+---
+
+This project is designed to create a beer recommendations based on existing user ratings from Beer Advocate data set and some user input that creates a weighting on different attributes. 
+
+
+This project uses the sparklyr package to manipulate a large data and create a beer (item) profile, using linear regression, and matches this with the a user profile.   
+
+The recommendations are created using the ml_linear_regression function from the sparklyr package to distribute, and the model is evaluated for accuracy and predictive power. 
+
+Description of source data:
+Unique Users(users) are defined by variable review_profilename
+Unique beer (items) are defined by variable beer_beerid
+Several beer attributes are rated within this data set, but for the purposes of this project only the overall rating, given by 'review_overall' will be used. 
+
+
+Data Source: 
+
+https://data.world/socialmediadata/beeradvocate  
+
+
+## Data Exploration
+```{r message=FALSE, echo=FALSE, warning=FALSE}
+
+# import libraries
+library(recommenderlab)
+library(dplyr)
+library(tidyr)
+#library(reshape2)
+library(caret)
+library(pROC)
+library(ggplot2)
+library(tictoc)
+
+
+beerdata <- read.csv("~/GitHub/IS643/beerdata.csv")
+
+
+sparseratings <- beerdata%>%select(beer_beerid, review_overall)%>%
+  group_by(beer_beerid)%>%
+  summarise(count=n())
+
+
+sparseusers <- beerdata%>%select(beer_beerid, review_profilename)%>%
+  group_by(review_profilename)%>%
+  summarise(count=n())
+```
+
+
+Our raw data contains `r nrow(beerdata)` data points, and a ratings matrix for this data would be 28762 X 42719. 
+
+The total number of distinct beers in the data is `r nrow(sparseratings)` and the beers cover a wide range of number of ratings, from as few as `r min(sparseratings$count)` to `r max(sparseratings$count)`. 
+
+The ratings provided are also sparse, as there are `r nrow(sparseratings %>% filter(count <100))` beers that have received less than 300 ratings. This accounts for`r nrow(sparseratings %>% filter(count <100))/nrow(sparseratings)` of the total number of items. 
+
+
+The number of ratings per user shows a fairly uniform distribution across the `r nrow(sparseusers)` distinct users, with the number of ratings ranging from `r min(sparseusers$count)` to `r max(sparseusers$count)`. There are `r nrow(sparseusers %>% filter(count < 100))` users that have rated less than 100 items.  This accounts for `r nrow(sparseusers %>% filter(count < 100))/nrow(sparseusers)` of the total number of users.
+```{r echo=FALSE}
+plot(sparseusers$count, main="Number of ratings per user")
+
+plot(sparseratings$count, main = "Number of ratings per beer")
+
+
+```
+
+
+## User Profile:  User inputs 
+
+User inputs are used in combination with previous user ratings to create a user profile.  
+Using explicitly defined inputs, along with historical ratings, helps mitigate the problem of having new users with limited rating history.  
+Additionally, the system requests how important trying new items is to the user, this is used to as a factor to determine if and how often to provide a random recommendation.  
+
+Explicitly defined attributes: 
+
+*** Importance (1-5) of bitterness 
+*** Importance (1-5) of aroma
+*** Importance (1-5) of appearance
+*** Importance (1-5) of palate
+*** Importance (1-5) of popularity
+
+Level of Random: 
+*** Importance (1-5) of trying new items 
+
+
+Once the user provides this information, each profile variable is scaled to calculate the relative importance of each to this user. 
+
+```{r}
+user.bitter <- as.numeric(readline ("On a scale of 1-5, how much do you enjoy bitterness? "))
+user.aroma <- as.numeric(readline ("On a scale of 1-5, how imporant is aroma? "))
+user.appear<- as.numeric(readline ("On a scale of 1-5, how imporant is the appearance? "))
+user.palate <- as.numeric(readline ("On a scale of 1-5, how imporant is the palate? "))
+user.pop <- as.numeric(readline("on a scale of 1-5, how imporant is popularity? "))
+
+user.new <- as.numeric(readline("on a scale of 1-5, how imporant is trying new items? "))
+
+#get important ones
+inputs <- c(user.bitter,user.aroma,user.appear,user.palate,user.pop)
+names(inputs) <- c("beer_abv", 
+                   "review_aroma", 
+                   "review_appearance", 
+                   "review_palate",
+                   "review_taste")
+                   
+inputs <- inputs/sum(inputs)
+            
+scale.inputs <- inputs/sum(inputs)
+
+top.inputs <- names(tail(sort(inputs),3))
+```
+
+
+
+## Model:  User and Item profiles
+
+
+This model will compare users attributes with item attributes to find good matches for recommendations.  The goal will be to predict if a beer will receive a positive rating from a given user.  The beers with the highest ratings will be offered to the user as recommendation.  Beers that received less than 100 ratings are not considered popular enough to be recommended to the users and are removed from the data. 
+
+***Beer Profile***
+
+To begin, a 'beer profile' is developed based on mean ratings for attributes of that beer.  Once all beer profiles are created, it can be used as an input to the user-specific model to determine an expected rating that particular user would give each beer. 
+
+***User Model***
+
+The user-specif model is calculated differently for users with many rates and users with limited ratings. 
+
+For users that have rated more than 100 beers the assumption is that enough data is provided to determine which variables are most influential for that user and a full model is created using aroma, appearance, palate,taste,and popularity.
+
+For users who have between 25 and 100 ratings, the assumption is that there may not be enough data to determine which factors are most influential.
+In this case the user-provided information is used to determine which fields to model, with only the top three attributes, as specified by the user, are used when creating a model based on that specific user data.  
+
+For users who have less than 25 ratings, the assumption is there is not enough data to create a meaningful model. A general model created for all users, using the top 3 tributes indicated in the specific user response.  
+
+
+*Intial Design*
+
+The initial design of this project was to create a function that can calculate an individual user's specific model, and then use distributed computing to run this function across multiple users at once. Because each model creation is computationally intensive, this would be a good use of the power of distributed computing.  
+
+Unfortunately, I encountered persistent difficulties implementing a user-defined function using the sparklyr package.  I attempted several configurations using spark_apply,  but was unsuccessful, and this approach was abandoned.  Instead, this project will calculate these models for each user separately 
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+
+
+
+library(sparklyr)
+# spark_install(version = "2.3.0", hadoop_version = "2.7")
+sc <- spark_connect(master = "local")
+
+#use spark to manipulate and calculate recommender systems
+
+beer_tbl <- spark_read_csv(sc, name = 'beer_sc',path = "~/GitHub/IS643/beerdata.csv")
+beer_tbl[is.na(beer_tbl)] <- 0 
+
+
+# remove ratings less than 1% of data points
+sparseratings <- beer_tbl%>%select(beer_beerid, review_overall)%>%
+  group_by(beer_beerid)%>%
+  summarise(count=n())
+
+
+v <- sparseratings%>% filter(count < 100 ) #where the beers have < 100 ratings
+
+dfbeerrm <- anti_join(beer_tbl, v, by = "beer_beerid", copy = FALSE)
+#dfbeerrm <- anti_join(dfbeerrm, w, by = "review_profilename", copy = FALSE)
+
+
+items <- dfbeerrm%>%select(beer_beerid, review_overall)%>%
+  group_by(beer_beerid)%>%
+  summarise(count=n())%>%arrange(-count)
+items_n <- count(items)
+
+users<- dfbeerrm%>%select(review_profilename, review_overall)%>%
+  group_by(review_profilename)%>%
+  summarise(count=n())%>%arrange(-count)
+
+users_n <- count(dfbeerrm%>%select(review_profilename, review_overall)%>%
+  group_by(review_profilename)%>%
+  summarise(count=n()))
+
+#group overall ratings by by beer styles to get an ABV value for missing ones
+beertypes <- dfbeerrm%>%
+  select(beer_style,beer_abv)%>%
+  group_by(beer_style)%>%
+  summarise(beer_abv_avg= mean(beer_abv,na.rm=TRUE))
+
+#poularity only
+dfpop <- dfbeerrm%>%select(beer_beerid)%>%
+  group_by(beer_beerid)%>%summarise(pop=n())
+
+#join popularity
+
+dfbeerrm <- dfbeerrm%>% left_join(dfpop, by = "beer_beerid")
+
+#add new ABV column
+dfbeerrm <- dfbeerrm%>% left_join(beertypes, by = "beer_style")
+
+dfbeerrm <- dfbeerrm %>%
+  mutate(beer_abv=ifelse(is.na(beer_abv),beer_abv_avg,beer_abv))
+
+d <- dfbeerrm%>%filter(is.na(taste))
+
+
+#create a beer profile beers in all data (train + test) so this will not need to be repeated
+
+dfbeerprof <- dfbeerrm%>%
+  select(beer_beerid, 
+         beer_name, 
+         beer_abv,
+         review_overall, 
+         review_aroma,
+         review_appearance,
+         review_palate,
+         review_taste,
+         pop)%>%
+  group_by(beer_beerid,beer_name,pop)%>%
+  summarise(review_aroma=mean(review_aroma), 
+            review_appearance = mean(review_appearance),
+            review_palate = mean(review_palate), 
+            review_taste = mean(review_taste),
+            beer_abv = mean(beer_abv))
+           
+            
+
+
+
+
+
+
+
+
+#look at it
+(glimpse(dfbeerprof))
+
+#data sets into train/test
+splitsville <- sdf_partition(dfbeerrm2, train = 0.8, test = 0.2, seed = 1234)
+
+
+train_beer <- splitsville$train
+
+test_beer <- splitsville$test
+
+#calculate a general model for all users with top 3 priorities
+df_genmod <- train_beer%>%
+    select(c(review_overall,top.inputs))
+genmodel <- df_genmod%>%ml_linear_regression(response = "review_overall",
+                                              features = top.inputs)
+
+
+
+```
+
+A general model, for all users, is created based on the top three attributes the user provided. 
+It is not a very strong model, but will be used when there are not enough data points in the user's existing ratings. 
+
+```{r echo=FALSE, warning=FALSE,message=FALSE}
+
+summary(genmodel)
+
+```
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+#Model The Beer Training Data
+#function below creates the model for that user 
+
+
+
+
+#user.model <- function(auser){
+#get specifics for this user
+#not a function
+
+#   df_user <- train_beer%>% filter(review_profilename == auser)%>%
+#     select(review_overall,
+#            review_aroma,
+#            review_appearance,
+#            review_palate,
+#            review_taste,
+#            beer_abv,
+#            count)
+#   num.rate <- as.integer(collect(count(df_user)))
+#   
+#   if (num.rate > 100) {
+#     #model beer ratings for this user
+#     model1 <- df_user%>%ml_linear_regression(response = "review_overall",
+#                                               features = c("review_aroma", 
+#                                                            "review_palate",
+#                                                            "review_appearance",
+#                                                            "review_taste",
+#                                                            "beer_abv",
+#                                                            "count"))
+#   }else if (num.rate > 25){
+#       
+#      model1 <- df_user%>%ml_linear_regression(response = "review_overall",
+#                                               features = top.inputs)
+#       
+#   }else {
+#     model1 <- genmodel 
+#   }
+# }
+  
+```
+
+
+
+###Model Examples
+Individual model results for the user are provided below. If there are fewer rates, the model may not predict historical data as well because we are using external information to modify the model.  
+
+To explore these models, three types of users were selected: 
+
+*scoobybrew* has over 100 ratings and this user's model will be driven by the their specific user data
+
+*AleDrinkToThat* has 32 ratings, and this user's model will be created using only the specified user inputs
+
+*AAis4quiters* has only two ratings, and this user's model will be created using a general model for all users, with only the specified attributes as predictors
+
+
+```{r scoobys echo=FALSE, warning=FALSE}
+#scoobybrew
+
+df_user <- train_beer%>% filter(review_profilename == "scoobybrew")
+
+num.rate <- as.integer(collect(count(df_user)))
+  
+  if (num.rate > 100) {
+    #model beer ratings for this user
+    model1 <- df_user%>%ml_linear_regression(response = "review_overall",
+                                              features = c("review_aroma", 
+                                                           "review_palate",
+                                                           "review_appearance",
+                                                           "review_taste",
+                                                           "beer_abv",
+                                                           "count"))
+  }else if (num.rate > 25){
+      
+     model1 <- df_user%>%ml_linear_regression(response = "review_overall",
+                                              features = top.inputs)
+      
+  }else {
+    model1 <- genmodel 
+  }
+
+  
+#*AleDrinkToThat
+  
+df_user <- train_beer%>% filter(review_profilename == "*AleDrinkToTha")%>%
+    select(review_overall,
+           review_aroma,
+           review_appearance,
+           review_palate,
+           review_taste,
+           beer_abv,
+           count)
+  num.rate <- as.integer(collect(count(df_user)))
+  
+  if (num.rate > 100) {
+    #model beer ratings for this user
+    model1 <- df_user%>%ml_linear_regression(response = "review_overall",
+                                              features = c("review_aroma", 
+                                                           "review_palate",
+                                                           "review_appearance",
+                                                           "review_taste",
+                                                           "beer_abv",
+                                                           "count"))
+  }else if (num.rate > 25){
+      
+     model1 <- df_user%>%ml_linear_regression(response = "review_overall",
+                                              features = top.inputs)
+      
+  }else {
+    model1 <- genmodel 
+  }
+
+  
+  
+  
+```
+
+
+Further evaluating the models, we can look at how each actually predicts the rating.  Comparing the errors from each model, it is interesting to note that the RMSE is not dramatically different between the random and SVD models when evaluating individual predictions. 
+
+```{r echo = FALSE}
+
+plot(predresults, ylim = c(0,5))
+
+
+```
+
+This is an indication that although a random selection of items offers a decent chance of positively rated items, it does not predict the user's rating for individual items as well.  
+
+Finding that the SVD model is not hugely better than a random selection may be a result of how the data was first reduced from a very sparse matrix down to much denser data for the purpose of this evaluation. We have a densely packed matrix full of positively rated items, in which case a random selection of several may provide a fairly good recommendation and be the simplest and best model. It is certainly faster and uses less resources.  
+
+This result indicates that little information is gained by having user and item history, and would need to be examined carefully before deciding if this scenario and data is an appropriate candidate for the SVD method. The reduction of the data may have changed the true shape and this large dimension problem may need to be approached in another fashion, by partitioning the data into subsets instead of only selecting for the dense elements. 
+
+
