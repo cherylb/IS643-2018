@@ -103,7 +103,7 @@ names(inputs) <- c("beer_abv",
                    "review_aroma", 
                    "review_appearance", 
                    "review_palate",
-                   "review_taste")
+                   "pop")
                    
 inputs <- inputs/sum(inputs)
             
@@ -225,17 +225,11 @@ dfbeerprof <- dfbeerrm%>%
             
 
 
-
-
-
-
-
-
 #look at it
 (glimpse(dfbeerprof))
 
 #data sets into train/test
-splitsville <- sdf_partition(dfbeerrm2, train = 0.8, test = 0.2, seed = 1234)
+splitsville <- sdf_partition(dfbeerrm, train = 0.8, test = 0.2, seed = 1234)
 
 
 train_beer <- splitsville$train
@@ -317,7 +311,7 @@ To explore these models, three types of users were selected:
 *AAis4quiters* has only two ratings, and this user's model will be created using a general model for all users, with only the specified attributes as predictors
 
 
-```{r scoobys echo=FALSE, warning=FALSE}
+```{r echo=FALSE, warning=FALSE}
 #scoobybrew
 
 df_user <- train_beer%>% filter(review_profilename == "scoobybrew")
@@ -332,7 +326,8 @@ num.rate <- as.integer(collect(count(df_user)))
                                                            "review_appearance",
                                                            "review_taste",
                                                            "beer_abv",
-                                                           "count"))
+                                                           "pop"))
+                                                          
   }else if (num.rate > 25){
       
      model1 <- df_user%>%ml_linear_regression(response = "review_overall",
@@ -343,55 +338,75 @@ num.rate <- as.integer(collect(count(df_user)))
   }
 
   
-#*AleDrinkToThat
-  
-df_user <- train_beer%>% filter(review_profilename == "*AleDrinkToTha")%>%
-    select(review_overall,
-           review_aroma,
-           review_appearance,
-           review_palate,
-           review_taste,
-           beer_abv,
-           count)
-  num.rate <- as.integer(collect(count(df_user)))
+#AleDrinkToThat
+
+
+df_user <- train_beer%>% filter(review_profilename == "AleDrinkToThat")
+
+num.rate <- as.integer(collect(count(df_user)))
   
   if (num.rate > 100) {
     #model beer ratings for this user
-    model1 <- df_user%>%ml_linear_regression(response = "review_overall",
+    model2 <- df_user%>%ml_linear_regression(response = "review_overall",
                                               features = c("review_aroma", 
                                                            "review_palate",
                                                            "review_appearance",
                                                            "review_taste",
                                                            "beer_abv",
-                                                           "count"))
+                                                           "pop"))
+                                                          
   }else if (num.rate > 25){
       
-     model1 <- df_user%>%ml_linear_regression(response = "review_overall",
+     model2 <- df_user%>%ml_linear_regression(response = "review_overall",
                                               features = top.inputs)
       
   }else {
-    model1 <- genmodel 
+    model2 <- genmodel 
+  }
+  
+
+#AAis4quiters
+
+
+df_user <- train_beer%>% filter(review_profilename == "AAis4quiters")
+
+num.rate <- as.integer(collect(count(df_user)))
+  
+  if (num.rate > 100) {
+    #model beer ratings for this user
+    model3 <- df_user%>%ml_linear_regression(response = "review_overall",
+                                              features = c("review_aroma", 
+                                                           "review_palate",
+                                                           "review_appearance",
+                                                           "review_taste",
+                                                           "beer_abv",
+                                                           "pop"))
+                                                          
+  }else if(num.rate > 25){
+      
+     model3 <- df_user%>%ml_linear_regression(response = "review_overall",
+                                           features = top.inputs)
+  }else{
+    model3 <- genmodel 
   }
 
-  
-  
-  
 ```
+## Next Steps
 
+The next steps required to compete the system are:
+**Use the created model for each user to model expected recommendations for all beers
+**Sort this list to see top recommended beers
+**return a list to the user that is a combination of top recommendations and random beers, the number of random beers determined by the 'user.new' variable which provided information on how much they liked trying new beers. 
 
-Further evaluating the models, we can look at how each actually predicts the rating.  Comparing the errors from each model, it is interesting to note that the RMSE is not dramatically different between the random and SVD models when evaluating individual predictions. 
-
-```{r echo = FALSE}
-
-plot(predresults, ylim = c(0,5))
+```{r}
+#predict using model
+#calculate the highest rated beers
+#return a list of (10 - user.new) from input to determine how many are needed.
+#add in user.new amount of random beers from list
+#total of 10 recommendations
 
 
 ```
-
-This is an indication that although a random selection of items offers a decent chance of positively rated items, it does not predict the user's rating for individual items as well.  
-
-Finding that the SVD model is not hugely better than a random selection may be a result of how the data was first reduced from a very sparse matrix down to much denser data for the purpose of this evaluation. We have a densely packed matrix full of positively rated items, in which case a random selection of several may provide a fairly good recommendation and be the simplest and best model. It is certainly faster and uses less resources.  
-
-This result indicates that little information is gained by having user and item history, and would need to be examined carefully before deciding if this scenario and data is an appropriate candidate for the SVD method. The reduction of the data may have changed the true shape and this large dimension problem may need to be approached in another fashion, by partitioning the data into subsets instead of only selecting for the dense elements. 
-
+##Further Analysis
+Further analysis of predictive power is needed to determine if these models predict the top recommendations.  A study of a confusion matrix for each type of model would be helpful, in that it can help determine what kind of error we might be producing in recommendations. 
 
